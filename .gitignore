@@ -1,0 +1,8 @@
+node_modules/
+club.db
+club.db-shm
+club.db-wal
+club-backup-*.db
+.vercel/
+.env
+.env.*
