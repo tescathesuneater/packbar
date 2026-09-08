@@ -6,7 +6,12 @@ const Database = require('better-sqlite3');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const db = new Database(path.join(__dirname, 'club.db'));
+// Vercel's deployed application directory is read-only. Keep local data beside
+// the app, but use its writable temporary directory when running as a function.
+// DATABASE_PATH can point at a writable persistent volume in other environments.
+const dbPath = process.env.DATABASE_PATH || path.join(process.env.VERCEL ? '/tmp' : __dirname, 'club.db');
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 app.use(express.json());
@@ -193,7 +198,7 @@ app.get('/api/closing',auth,(req,res)=>{const d=req.query.date||today();const op
 app.post('/api/closing',auth,allow('Administrator/Owner','Manager'),(req,res)=>{try{const x=req.body||{},d=x.close_date||today();if(!validDate(d))throw Error('Enter a valid closing date');const sales=db.prepare(`SELECT payment_method,COALESCE(SUM(total),0) total FROM sales WHERE sale_date=? AND voided_at IS NULL GROUP BY payment_method`).all(d);const by=Object.fromEntries(sales.map(y=>[y.payment_method,y.total]));const exp=db.prepare('SELECT COALESCE(SUM(amount),0) total FROM expenses WHERE expense_date=?').get(d).total;const expected=num(x.opening_cash)+num(by.Cash)-num(exp);const actual=num(x.actual_cash);const diff=actual-expected;db.prepare(`INSERT INTO daily_closings(close_date,opening_cash,cash_sales,mpesa_sales,card_sales,other_sales,expenses,expected_cash,actual_cash,difference,closed_at,closed_by,note) VALUES(?,?,?,?,?,?,?,?,?,?,datetime('now'),?,?) ON CONFLICT(close_date) DO UPDATE SET opening_cash=excluded.opening_cash,cash_sales=excluded.cash_sales,mpesa_sales=excluded.mpesa_sales,card_sales=excluded.card_sales,other_sales=excluded.other_sales,expenses=excluded.expenses,expected_cash=excluded.expected_cash,actual_cash=excluded.actual_cash,difference=excluded.difference,closed_at=excluded.closed_at,closed_by=excluded.closed_by,note=excluded.note`).run(d,num(x.opening_cash),by.Cash||0,by['M-Pesa']||0,by.Card||0,by.Other||0,exp,expected,actual,diff,req.user.username,cleanText(x.note,500));audit('CLOSE','daily_closing',null,`${d} difference ${diff}`,req.user.username);res.json({date:d,expected_cash:expected,actual_cash:actual,difference:diff})}catch(e){res.status(400).json({error:e.message})}});
 
 app.get('/api/audit',auth,allow('Administrator/Owner','Manager'),(req,res)=>res.json(db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 300').all()));
-app.get('/api/backup',auth,allow('Administrator/Owner'),(req,res)=>{const out=path.join(__dirname,`club-backup-${Date.now()}.db`);db.pragma('wal_checkpoint(TRUNCATE)');fs.copyFileSync(path.join(__dirname,'club.db'),out);res.download(out,'park-bar-backup.db',()=>{try{fs.unlinkSync(out)}catch{}})});
+app.get('/api/backup',auth,allow('Administrator/Owner'),(req,res)=>{const out=path.join(path.dirname(dbPath),`club-backup-${Date.now()}.db`);db.pragma('wal_checkpoint(TRUNCATE)');fs.copyFileSync(dbPath,out);res.download(out,'park-bar-backup.db',()=>{try{fs.unlinkSync(out)}catch{}})});
 app.get('/api/settings',auth,(req,res)=>res.json(Object.fromEntries(db.prepare('SELECT key,value FROM settings').all().map(x=>[x.key,x.value]))));
 app.use((req,res,next)=>{if(req.path.startsWith('/api/')) return res.status(404).json({error:'Not found'});next()});
 function startServer(port) {
@@ -207,4 +212,8 @@ function startServer(port) {
   throw error;
  });
 }
-startServer(PORT);
+if (require.main === module) startServer(PORT);
+
+// Vercel's Node runtime invokes this Express application as a serverless
+// function. Do not open a listener when the module is loaded by Vercel.
+module.exports = app;
